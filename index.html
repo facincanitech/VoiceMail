@@ -59,6 +59,18 @@
   select, input[type=range] { vertical-align: middle; }
   .settings-row { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; justify-content: center; font-size: 0.85rem; color: #b0b3b8; }
   .empty { color: #9aa0a6; text-align: center; margin-top: 40px; }
+  .card.read { opacity: 0.35; }
+  #filter-input {
+    background: #1a1d24;
+    border: 1px solid #2a2d35;
+    color: #e8e8e8;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 0.85rem;
+    flex: 1;
+    min-width: 160px;
+  }
+  #counter { color: #9aa0a6; font-size: 0.85rem; text-align: center; margin-bottom: 12px; }
 </style>
 </head>
 <body>
@@ -78,6 +90,11 @@
       <input type="range" id="rate" min="0.6" max="1.6" step="0.1" value="1">
     </label>
   </div>
+  <div class="settings-row">
+    <input type="text" id="filter-input" placeholder="Filtrar por remetente ou assunto...">
+    <label><input type="checkbox" id="continuous-mode"> Modo contínuo</label>
+  </div>
+  <div id="counter"></div>
   <div id="list"></div>
 </div>
 
@@ -98,7 +115,7 @@
    5. Cole o Client ID abaixo
 */
 const CLIENT_ID = '614074980827-7k3u0ugpmk8100chp5m1998b36peajo9.apps.googleusercontent.com';
-const SCOPES = 'https://www.googleapis.com/auth/gmail.readonly';
+const SCOPES = 'https://www.googleapis.com/auth/gmail.modify';
 
 let tokenClient;
 let accessToken = null;
@@ -179,6 +196,26 @@ function stripHtml(html) {
   return div.textContent || div.innerText || '';
 }
 
+function cleanBody(text) {
+  return text
+    .replace(/https?:\/\/\S+/gi, '')
+    .replace(/www\.\S+/gi, '')
+    .replace(/\S+@\S+\.\S+/gi, '')
+    .replace(/clique\s+aqui/gi, '')
+    .replace(/click\s+here/gi, '')
+    .replace(/leia\s+mais/gi, '')
+    .replace(/saiba\s+mais/gi, '')
+    .replace(/ver\s+no\s+navegador/gi, '')
+    .replace(/visualizar\s+no\s+navegador/gi, '')
+    .replace(/cancelar\s+inscri[cç][aã]o/gi, '')
+    .replace(/unsubscribe/gi, '')
+    .replace(/alterar\s+prefer[eê]ncias/gi, '')
+    .replace(/todos\s+os\s+direitos\s+reservados.*$/gim, '')
+    .replace(/powered\s+by\s+\S+/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function getHeader(headers, name) {
   const h = headers.find(h => h.name.toLowerCase() === name.toLowerCase());
   return h ? h.value : '';
@@ -210,6 +247,20 @@ async function fetchUnread() {
     renderList();
     controls.style.display = 'flex';
     window.addEventListener('scroll', maybeLoadMore);
+
+    const lastEmailId = localStorage.getItem('voicemail_lastEmailId');
+    if (lastEmailId) {
+      const idx = emails.findIndex(e => e.id === lastEmailId);
+      if (idx !== -1) {
+        currentIndex = idx;
+        const card = document.getElementById(`card-${idx}`);
+        if (card) {
+          card.classList.add('active');
+          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        updateCounter();
+      }
+    }
   } catch (err) {
     statusEl.textContent = 'Erro ao buscar e-mails: ' + err.message;
   }
@@ -221,13 +272,14 @@ async function loadEmail(id) {
   const from = getHeader(headers, 'From');
   const subject = getHeader(headers, 'Subject') || '(sem assunto)';
   let body = extractBody(msg.payload);
-  body = stripHtml(body).replace(/\s+/g, ' ').trim();
+  body = cleanBody(stripHtml(body));
   return {
     id: msg.id,
     from: from.replace(/<.*?>/, '').trim(),
     subject,
     body: body.slice(0, 1000) || msg.snippet || '',
     snippet: msg.snippet || '',
+    read: false,
   };
 }
 
@@ -255,9 +307,30 @@ async function loadMore() {
   }
 }
 
+const filterInput = document.getElementById('filter-input');
+const continuousCheckbox = document.getElementById('continuous-mode');
+const counterEl = document.getElementById('counter');
+
+function getVisibleIndices() {
+  const query = filterInput.value.trim().toLowerCase();
+  return emails
+    .map((e, i) => i)
+    .filter(i => !emails[i].read)
+    .filter(i => {
+      if (!query) return true;
+      const e = emails[i];
+      return e.from.toLowerCase().includes(query) || e.subject.toLowerCase().includes(query);
+    });
+}
+
 function renderList() {
   listEl.innerHTML = '';
-  emails.forEach((e, i) => {
+  const visible = getVisibleIndices();
+  if (visible.length === 0) {
+    listEl.innerHTML = '<div class="empty">📭 Nada para mostrar.</div>';
+  }
+  visible.forEach(i => {
+    const e = emails[i];
     const card = document.createElement('div');
     card.className = 'card';
     card.id = `card-${i}`;
@@ -267,6 +340,34 @@ function renderList() {
     card.addEventListener('click', () => speakIndex(i));
     listEl.appendChild(card);
   });
+  updateCounter();
+}
+
+function updateCounter() {
+  const visible = getVisibleIndices();
+  if (visible.length === 0) {
+    counterEl.textContent = '';
+    return;
+  }
+  const pos = visible.indexOf(currentIndex);
+  counterEl.textContent = `${pos === -1 ? 1 : pos + 1} de ${visible.length} não lidos`;
+}
+
+filterInput.addEventListener('input', renderList);
+
+async function markAsRead(id) {
+  try {
+    await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}/modify`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ removeLabelIds: ['UNREAD'] }),
+    });
+  } catch (err) {
+    console.error('Falha ao marcar como lido:', err);
+  }
 }
 
 function escapeHtml(str) {
@@ -328,34 +429,60 @@ function setPlayingState(isPlaying) {
   playBtn.innerHTML = isPlaying ? '⏹ Parar' : '▶ Ler';
 }
 
-function speakText(text, onEnd) {
+const PAUSE_MS = 500;
+
+function speakParts(parts, onAllEnd) {
   speechSynthesis.cancel();
-  const utter = new SpeechSynthesisUtterance(text);
   const selected = voices[voiceSelect.value];
-  if (selected) utter.voice = selected;
-  utter.rate = parseFloat(rateInput.value);
-  utter.lang = selected ? selected.lang : 'pt-BR';
-  utter.onstart = () => setPlayingState(true);
-  utter.onend = () => {
-    setPlayingState(false);
-    if (onEnd) onEnd();
-  };
-  utter.onerror = () => setPlayingState(false);
-  speechSynthesis.speak(utter);
+  let partIndex = 0;
+
+  function speakNextPart() {
+    if (partIndex >= parts.length) {
+      setPlayingState(false);
+      if (onAllEnd) onAllEnd();
+      return;
+    }
+    const utter = new SpeechSynthesisUtterance(parts[partIndex]);
+    if (selected) utter.voice = selected;
+    utter.rate = parseFloat(rateInput.value);
+    utter.lang = selected ? selected.lang : 'pt-BR';
+    utter.onstart = () => setPlayingState(true);
+    utter.onerror = () => setPlayingState(false);
+    utter.onend = () => {
+      partIndex++;
+      if (partIndex < parts.length) {
+        setTimeout(speakNextPart, PAUSE_MS);
+      } else {
+        speakNextPart();
+      }
+    };
+    speechSynthesis.speak(utter);
+  }
+  speakNextPart();
 }
 
 function speakIndex(i) {
   if (i < 0 || i >= emails.length) return;
   currentIndex = i;
+  localStorage.setItem('voicemail_lastEmailId', emails[i].id);
   document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
   const card = document.getElementById(`card-${i}`);
   if (card) {
     card.classList.add('active');
     card.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
+  updateCounter();
   const e = emails[i];
-  const text = `De ${e.from}. Assunto: ${e.subject}. ${e.body}`;
-  speakText(text);
+  const parts = [`De ${e.from}.`, `Assunto: ${e.subject}.`, e.body];
+  speakParts(parts, async () => {
+    e.read = true;
+    await markAsRead(e.id);
+    renderList();
+    if (continuousCheckbox.checked) {
+      const visible = getVisibleIndices();
+      if (visible.length > 0) speakIndex(visible[0]);
+    }
+  });
 }
 
 playBtn.addEventListener('click', () => {
@@ -364,19 +491,40 @@ playBtn.addEventListener('click', () => {
     setPlayingState(false);
     return;
   }
-  speakIndex(currentIndex === -1 ? 0 : currentIndex);
+  const visible = getVisibleIndices();
+  const startIndex = visible.includes(currentIndex) ? currentIndex : visible[0];
+  if (startIndex !== undefined) speakIndex(startIndex);
 });
 
 document.getElementById('next-btn').addEventListener('click', () => {
-  speakIndex(Math.min(currentIndex + 1, emails.length - 1));
+  const visible = getVisibleIndices();
+  const pos = visible.indexOf(currentIndex);
+  const nextPos = pos === -1 ? 0 : Math.min(pos + 1, visible.length - 1);
+  if (visible[nextPos] !== undefined) speakIndex(visible[nextPos]);
 });
 
 document.getElementById('prev-btn').addEventListener('click', () => {
-  speakIndex(Math.max(currentIndex - 1, 0));
+  const visible = getVisibleIndices();
+  const pos = visible.indexOf(currentIndex);
+  const prevPos = pos === -1 ? 0 : Math.max(pos - 1, 0);
+  if (visible[prevPos] !== undefined) speakIndex(visible[prevPos]);
 });
 
 document.getElementById('repeat-btn').addEventListener('click', () => {
   speakIndex(currentIndex === -1 ? 0 : currentIndex);
+});
+
+document.addEventListener('keydown', (ev) => {
+  const tag = document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  if (ev.code === 'Space') {
+    ev.preventDefault();
+    playBtn.click();
+  } else if (ev.code === 'ArrowRight') {
+    document.getElementById('next-btn').click();
+  } else if (ev.code === 'ArrowLeft') {
+    document.getElementById('prev-btn').click();
+  }
 });
 
 window.addEventListener('load', () => {
