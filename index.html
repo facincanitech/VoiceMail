@@ -184,9 +184,17 @@ function getHeader(headers, name) {
   return h ? h.value : '';
 }
 
+const PAGE_SIZE = 20;
+let nextPageToken = null;
+let isLoadingMore = false;
+let reachedEnd = false;
+
 async function fetchUnread() {
   try {
-    const listResp = await gmailFetch('messages?labelIds=UNREAD&maxResults=15');
+    const listResp = await gmailFetch(`messages?labelIds=UNREAD&maxResults=${PAGE_SIZE}`);
+    nextPageToken = listResp.nextPageToken || null;
+    if (!nextPageToken) reachedEnd = true;
+
     if (!listResp.messages || listResp.messages.length === 0) {
       statusEl.textContent = '';
       listEl.innerHTML = '<div class="empty">📭 Nenhum e-mail não lido. Boa!</div>';
@@ -195,26 +203,55 @@ async function fetchUnread() {
 
     emails = [];
     for (const m of listResp.messages) {
-      const msg = await gmailFetch(`messages/${m.id}?format=full`);
-      const headers = msg.payload.headers;
-      const from = getHeader(headers, 'From');
-      const subject = getHeader(headers, 'Subject') || '(sem assunto)';
-      let body = extractBody(msg.payload);
-      body = stripHtml(body).replace(/\s+/g, ' ').trim();
-      emails.push({
-        id: msg.id,
-        from: from.replace(/<.*?>/, '').trim(),
-        subject,
-        body: body.slice(0, 1000) || msg.snippet || '',
-        snippet: msg.snippet || '',
-      });
+      emails.push(await loadEmail(m.id));
     }
 
     statusEl.textContent = '';
     renderList();
     controls.style.display = 'flex';
+    window.addEventListener('scroll', maybeLoadMore);
   } catch (err) {
     statusEl.textContent = 'Erro ao buscar e-mails: ' + err.message;
+  }
+}
+
+async function loadEmail(id) {
+  const msg = await gmailFetch(`messages/${id}?format=full`);
+  const headers = msg.payload.headers;
+  const from = getHeader(headers, 'From');
+  const subject = getHeader(headers, 'Subject') || '(sem assunto)';
+  let body = extractBody(msg.payload);
+  body = stripHtml(body).replace(/\s+/g, ' ').trim();
+  return {
+    id: msg.id,
+    from: from.replace(/<.*?>/, '').trim(),
+    subject,
+    body: body.slice(0, 1000) || msg.snippet || '',
+    snippet: msg.snippet || '',
+  };
+}
+
+function maybeLoadMore() {
+  if (isLoadingMore || reachedEnd) return;
+  const nearBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 300;
+  if (nearBottom) loadMore();
+}
+
+async function loadMore() {
+  if (!nextPageToken || isLoadingMore) return;
+  isLoadingMore = true;
+  try {
+    const listResp = await gmailFetch(`messages?labelIds=UNREAD&maxResults=${PAGE_SIZE}&pageToken=${nextPageToken}`);
+    nextPageToken = listResp.nextPageToken || null;
+    if (!nextPageToken) reachedEnd = true;
+    if (listResp.messages) {
+      for (const m of listResp.messages) {
+        emails.push(await loadEmail(m.id));
+      }
+      renderList();
+    }
+  } finally {
+    isLoadingMore = false;
   }
 }
 
