@@ -242,6 +242,8 @@ function populateVoices() {
   voiceSelect.innerHTML = voices
     .map((v, i) => `<option value="${i}">${v.name} (${v.lang})</option>`)
     .join('');
+  const preferredIndex = voices.findIndex(v => /Francisca.*Online.*Natural/i.test(v.name));
+  if (preferredIndex !== -1) voiceSelect.value = preferredIndex;
 }
 speechSynthesis.onvoiceschanged = populateVoices;
 populateVoices();
