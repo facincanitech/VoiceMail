@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VoiceMail — Gmail por voz</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0f1115;
+    color: #e8e8e8;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px 80px;
+  }
+  h1 { font-size: 1.4rem; margin: 8px 0 4px; }
+  .sub { color: #9aa0a6; font-size: 0.9rem; margin-bottom: 24px; text-align: center; }
+  button {
+    border: none;
+    border-radius: 10px;
+    padding: 12px 20px;
+    font-size: 1rem;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  #signin-btn { background: #4285f4; color: #fff; }
+  #signin-btn:hover { background: #3367d6; }
+  #panel { display: none; width: 100%; max-width: 480px; }
+  .card {
+    background: #1a1d24;
+    border-radius: 14px;
+    padding: 18px;
+    margin-bottom: 14px;
+  }
+  .card .from { font-weight: 600; color: #8ab4f8; font-size: 0.95rem; }
+  .card .subject { font-size: 1.05rem; margin: 4px 0; }
+  .card .snippet { color: #b0b3b8; font-size: 0.9rem; line-height: 1.4; }
+  .card.active { outline: 2px solid #34a853; }
+  .controls {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: #1a1d24;
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    padding: 14px;
+    border-top: 1px solid #2a2d35;
+  }
+  .controls button { background: #2a2d35; color: #e8e8e8; min-width: 64px; }
+  .controls button:hover { background: #34373f; }
+  #play-btn { background: #34a853 !important; color: #fff !important; }
+  #status { color: #9aa0a6; font-size: 0.85rem; margin: 6px 0 18px; min-height: 1.2em; }
+  select, input[type=range] { vertical-align: middle; }
+  .settings-row { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; justify-content: center; font-size: 0.85rem; color: #b0b3b8; }
+  .empty { color: #9aa0a6; text-align: center; margin-top: 40px; }
+</style>
+</head>
+<body>
+
+<h1>🔊 VoiceMail</h1>
+<div class="sub">Seus e-mails não lidos, lidos em voz alta.</div>
+
+<button id="signin-btn">Entrar com Google</button>
+<div id="status"></div>
+
+<div id="panel">
+  <div class="settings-row">
+    <label>Voz:
+      <select id="voice-select"></select>
+    </label>
+    <label>Velocidade:
+      <input type="range" id="rate" min="0.6" max="1.6" step="0.1" value="1">
+    </label>
+  </div>
+  <div id="list"></div>
+</div>
+
+<div class="controls" id="controls" style="display:none;">
+  <button id="prev-btn">⏮ Anterior</button>
+  <button id="play-btn">▶ Ler</button>
+  <button id="repeat-btn">🔁 Repetir</button>
+  <button id="next-btn">⏭ Próximo</button>
+</div>
+
+<script>
+/* ====== CONFIGURE AQUI ======
+   1. Crie um projeto em https://console.cloud.google.com
+   2. Ative a "Gmail API"
+   3. Crie credenciais OAuth2.0 "ID do cliente OAuth" tipo "App da Web"
+   4. Em "Origens JavaScript autorizadas" adicione a URL do seu GitHub Pages
+      (ex: https://seu-usuario.github.io) e também http://localhost:5500 para testes locais
+   5. Cole o Client ID abaixo
+*/
+const CLIENT_ID = 'COLOQUE_SEU_CLIENT_ID_AQUI.apps.googleusercontent.com';
+const SCOPES = 'https://www.googleapis.com/auth/gmail.readonly';
+
+let tokenClient;
+let accessToken = null;
+let emails = [];
+let currentIndex = -1;
+let voices = [];
+
+const signinBtn = document.getElementById('signin-btn');
+const statusEl = document.getElementById('status');
+const panel = document.getElementById('panel');
+const listEl = document.getElementById('list');
+const controls = document.getElementById('controls');
+const voiceSelect = document.getElementById('voice-select');
+const rateInput = document.getElementById('rate');
+
+function loadGis() {
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CLIENT_ID,
+    scope: SCOPES,
+    callback: (resp) => {
+      if (resp.error) {
+        statusEl.textContent = 'Erro no login: ' + resp.error;
+        return;
+      }
+      accessToken = resp.access_token;
+      onSignedIn();
+    },
+  });
+}
+
+signinBtn.addEventListener('click', () => {
+  tokenClient.requestAccessToken();
+});
+
+async function onSignedIn() {
+  signinBtn.style.display = 'none';
+  statusEl.textContent = 'Carregando e-mails não lidos...';
+  panel.style.display = 'block';
+  await fetchUnread();
+}
+
+async function gmailFetch(path) {
+  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error(`Gmail API error ${res.status}`);
+  return res.json();
+}
+
+function decodeBase64Url(str) {
+  str = str.replace(/-/g, '+').replace(/_/g, '/');
+  try {
+    return decodeURIComponent(escape(atob(str)));
+  } catch (e) {
+    return atob(str);
+  }
+}
+
+function extractBody(payload) {
+  if (!payload) return '';
+  if (payload.body && payload.body.data) {
+    return decodeBase64Url(payload.body.data);
+  }
+  if (payload.parts) {
+    const plain = payload.parts.find(p => p.mimeType === 'text/plain');
+    if (plain && plain.body && plain.body.data) return decodeBase64Url(plain.body.data);
+    for (const part of payload.parts) {
+      const nested = extractBody(part);
+      if (nested) return nested;
+    }
+  }
+  return '';
+}
+
+function stripHtml(html) {
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  return div.textContent || div.innerText || '';
+}
+
+function getHeader(headers, name) {
+  const h = headers.find(h => h.name.toLowerCase() === name.toLowerCase());
+  return h ? h.value : '';
+}
+
+async function fetchUnread() {
+  try {
+    const listResp = await gmailFetch('messages?labelIds=UNREAD&maxResults=15');
+    if (!listResp.messages || listResp.messages.length === 0) {
+      statusEl.textContent = '';
+      listEl.innerHTML = '<div class="empty">📭 Nenhum e-mail não lido. Boa!</div>';
+      return;
+    }
+
+    emails = [];
+    for (const m of listResp.messages) {
+      const msg = await gmailFetch(`messages/${m.id}?format=full`);
+      const headers = msg.payload.headers;
+      const from = getHeader(headers, 'From');
+      const subject = getHeader(headers, 'Subject') || '(sem assunto)';
+      let body = extractBody(msg.payload);
+      body = stripHtml(body).replace(/\s+/g, ' ').trim();
+      emails.push({
+        id: msg.id,
+        from: from.replace(/<.*?>/, '').trim(),
+        subject,
+        body: body.slice(0, 1000) || msg.snippet || '',
+        snippet: msg.snippet || '',
+      });
+    }
+
+    statusEl.textContent = '';
+    renderList();
+    controls.style.display = 'flex';
+  } catch (err) {
+    statusEl.textContent = 'Erro ao buscar e-mails: ' + err.message;
+  }
+}
+
+function renderList() {
+  listEl.innerHTML = '';
+  emails.forEach((e, i) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.id = `card-${i}`;
+    card.innerHTML = `<div class="from">${escapeHtml(e.from)}</div>
+      <div class="subject">${escapeHtml(e.subject)}</div>
+      <div class="snippet">${escapeHtml(e.snippet)}</div>`;
+    card.addEventListener('click', () => speakIndex(i));
+    listEl.appendChild(card);
+  });
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function populateVoices() {
+  voices = speechSynthesis.getVoices().filter(v => v.lang.startsWith('pt') || v.lang.startsWith('en'));
+  if (voices.length === 0) voices = speechSynthesis.getVoices();
+  voiceSelect.innerHTML = voices
+    .map((v, i) => `<option value="${i}">${v.name} (${v.lang})</option>`)
+    .join('');
+}
+speechSynthesis.onvoiceschanged = populateVoices;
+populateVoices();
+
+function speakText(text, onEnd) {
+  speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance(text);
+  const selected = voices[voiceSelect.value];
+  if (selected) utter.voice = selected;
+  utter.rate = parseFloat(rateInput.value);
+  utter.lang = selected ? selected.lang : 'pt-BR';
+  if (onEnd) utter.onend = onEnd;
+  speechSynthesis.speak(utter);
+}
+
+function speakIndex(i) {
+  if (i < 0 || i >= emails.length) return;
+  currentIndex = i;
+  document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+  const card = document.getElementById(`card-${i}`);
+  if (card) {
+    card.classList.add('active');
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+  const e = emails[i];
+  const text = `De ${e.from}. Assunto: ${e.subject}. ${e.body}`;
+  speakText(text);
+}
+
+document.getElementById('play-btn').addEventListener('click', () => {
+  if (speechSynthesis.speaking) {
+    speechSynthesis.cancel();
+    return;
+  }
+  speakIndex(currentIndex === -1 ? 0 : currentIndex);
+});
+
+document.getElementById('next-btn').addEventListener('click', () => {
+  speakIndex(Math.min(currentIndex + 1, emails.length - 1));
+});
+
+document.getElementById('prev-btn').addEventListener('click', () => {
+  speakIndex(Math.max(currentIndex - 1, 0));
+});
+
+document.getElementById('repeat-btn').addEventListener('click', () => {
+  speakIndex(currentIndex === -1 ? 0 : currentIndex);
+});
+
+window.addEventListener('load', () => {
+  if (typeof google === 'undefined') {
+    statusEl.textContent = 'Erro: Google Identity Services não carregou.';
+    return;
+  }
+  loadGis();
+});
+</script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</body>
+</html>
