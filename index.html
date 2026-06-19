@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>VoiceMail — Gmail por voz</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔊</text></svg>">
+<link rel="manifest" href="manifest.json">
 <style>
   * { box-sizing: border-box; }
   body {
@@ -30,6 +31,8 @@
   }
   #signin-btn { background: #4285f4; color: #fff; }
   #signin-btn:hover { background: #3367d6; }
+  #install-btn { background: #fbbc04; color: #1a1d24; display: none; margin-top: 12px; }
+  #install-btn:hover { background: #f9ab00; }
   #panel { display: none; width: 100%; max-width: 480px; }
   .card {
     background: #1a1d24;
@@ -79,6 +82,8 @@
 <div class="sub">Seus e-mails não lidos, lidos em voz alta.</div>
 
 <button id="signin-btn">Entrar com Google</button>
+<br>
+<button id="install-btn">📲 Instalar VoiceMail no seu dispositivo</button>
 <div id="status"></div>
 
 <div id="panel">
@@ -533,6 +538,30 @@ window.addEventListener('load', () => {
     return;
   }
   loadGis();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+});
+
+let deferredInstallPrompt = null;
+const installBtn = document.getElementById('install-btn');
+
+window.addEventListener('beforeinstallprompt', (ev) => {
+  ev.preventDefault();
+  deferredInstallPrompt = ev;
+  installBtn.style.display = 'inline-block';
+});
+
+installBtn.addEventListener('click', async () => {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  installBtn.style.display = 'none';
+});
+
+window.addEventListener('appinstalled', () => {
+  installBtn.style.display = 'none';
 });
 </script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
