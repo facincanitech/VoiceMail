@@ -256,8 +256,11 @@ function voiceRank(v) {
   return 3;
 }
 
+const CONFIRMED_ONLINE_VOICES = /Francisca|Antonio|Aria|Guy/i;
+
 function populateVoices() {
   voices = speechSynthesis.getVoices().filter(v => v.lang.startsWith('pt') || v.lang.startsWith('en'));
+  voices = voices.filter(v => !/Online.*Natural/i.test(v.name) || CONFIRMED_ONLINE_VOICES.test(v.name));
   if (voices.length === 0) voices = speechSynthesis.getVoices();
   voices.sort((a, b) => voiceRank(a) - voiceRank(b));
   voiceSelect.innerHTML = voices
